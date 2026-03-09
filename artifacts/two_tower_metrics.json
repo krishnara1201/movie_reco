@@ -1,0 +1,29 @@
+{
+  "history": [
+    {
+      "epoch": 1.0,
+      "loss": 0.5534538281864898,
+      "recall@10": 0.08647311298780934
+    },
+    {
+      "epoch": 2.0,
+      "loss": 0.4349886038622191,
+      "recall@10": 0.08211150773123342
+    }
+  ],
+  "config": {
+    "embedding_dim": 64,
+    "hidden_dim": 128,
+    "output_dim": 64,
+    "batch_size": 256,
+    "epochs": 2,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05,
+    "k": 10,
+    "seed": 42
+  },
+  "num_users": 942,
+  "num_items": 1408,
+  "device": "cuda",
+  "checkpoint": "/home/shreyash/projects/recommendation_ml/artifacts/two_tower.pt"
+}

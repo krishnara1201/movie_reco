@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.vscode/
+
+# Large/generated artifacts
+artifacts/*.pt
+artifacts/sweeps/
+artifacts/sweep_bpr/
+
+# OS/editor
+.DS_Store
+Thumbs.db

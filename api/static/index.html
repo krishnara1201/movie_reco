@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Two-Tower Recommender Demo</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { margin-bottom: 8px; }
+      .row { display: flex; gap: 24px; align-items: flex-start; }
+      .panel { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; flex: 1; }
+      .controls { display: flex; gap: 8px; margin-bottom: 8px; }
+      input, button, select { padding: 8px; border-radius: 6px; border: 1px solid #d1d5db; }
+      button { cursor: pointer; background: #111827; color: white; }
+      ul { padding-left: 16px; }
+      .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+      .chip { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 999px; padding: 6px 10px; font-size: 13px; }
+      .hint { font-size: 12px; color: #6b7280; }
+      .error { color: #b91c1c; }
+      canvas { max-height: 320px; }
+      .flow { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; margin: 10px 0 16px; }
+      .flow-card { border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; background: #fafafa; font-size: 13px; }
+      .heatmap { width: 100%; border-collapse: collapse; margin-top: 8px; }
+      .heatmap th, .heatmap td { border: 1px solid #e5e7eb; padding: 6px; font-size: 12px; }
+      .mini { font-size: 12px; color: #4b5563; margin-top: 6px; }
+      @media (max-width: 900px) {
+        .row { flex-direction: column; }
+        .flow { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Two-Tower Movie Recommender</h1>
+    <p class="hint">Pick movies the user likes, then generate recommendations and inspect why items were selected.</p>
+
+    <section class="panel" style="margin-bottom: 18px;">
+      <h2>How The Model Predicts</h2>
+      <div class="flow">
+        <div class="flow-card"><strong>1) Encode liked movies</strong><br />Each selected movie ID goes through the item tower to get dense vectors.</div>
+        <div class="flow-card"><strong>2) Build user profile</strong><br />Vectors are averaged then L2-normalized to create a temporary user embedding.</div>
+        <div class="flow-card"><strong>3) Score all movies</strong><br />Compute dot product: <code>score = user_vec . item_vec</code> for each catalog item.</div>
+        <div class="flow-card"><strong>4) Rank + explain</strong><br />Top-K by score; contribution chart uses similarity between recommended item and each liked movie.</div>
+      </div>
+      <p id="debugSummary" class="mini"></p>
+    </section>
+
+    <div class="row">
+      <section class="panel">
+        <h2>Input Profile</h2>
+        <div class="controls">
+          <input id="movieSearch" placeholder="Search movies..." />
+          <button id="searchBtn">Search</button>
+        </div>
+        <select id="movieResults" size="10" style="width: 100%;"></select>
+        <div class="controls" style="margin-top: 8px;">
+          <button id="addBtn">Add Selected Movie</button>
+          <button id="clearBtn">Clear</button>
+        </div>
+        <div id="selectedChips" class="chips"></div>
+
+        <div class="controls" style="margin-top: 12px;">
+          <label for="topK">Top-K</label>
+          <input id="topK" type="number" min="1" max="20" value="5" style="width: 80px;" />
+          <button id="predictBtn">Get Recommendations</button>
+        </div>
+        <p id="status" class="hint"></p>
+        <p id="error" class="error"></p>
+      </section>
+
+      <section class="panel">
+        <h2>Recommendations</h2>
+        <ul id="recommendationList"></ul>
+        <h3>Prediction Scores</h3>
+        <canvas id="scoreChart"></canvas>
+        <h3>Why this recommendation?</h3>
+        <p class="hint">Shows similarity between selected liked movies and the first recommended movie.</p>
+        <canvas id="contribChart"></canvas>
+        <h3>Contribution Heatmap</h3>
+        <p class="hint">Rows are recommended movies, columns are your selected liked movies. Darker means stronger contribution.</p>
+        <div id="heatmapContainer"></div>
+      </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      const selected = new Map();
+      let scoreChart;
+      let contribChart;
+
+      function colorForSimilarity(value, min, max) {
+        const safeMin = Number.isFinite(min) ? min : 0;
+        const safeMax = Number.isFinite(max) ? max : 1;
+        const denom = safeMax - safeMin || 1;
+        const t = Math.max(0, Math.min(1, (value - safeMin) / denom));
+        const alpha = 0.15 + t * 0.75;
+        return `rgba(17, 24, 39, ${alpha.toFixed(3)})`;
+      }
+
+      async function fetchMovies(query = "") {
+        const response = await fetch(`/movies?query=${encodeURIComponent(query)}&limit=200`);
+        if (!response.ok) throw new Error("Failed to fetch movies");
+        return response.json();
+      }
+
+      function renderMovieResults(items) {
+        const select = document.getElementById("movieResults");
+        select.innerHTML = "";
+        items.forEach((movie) => {
+          const option = document.createElement("option");
+          option.value = movie.item_id;
+          option.textContent = `${movie.title} (id=${movie.item_id})`;
+          option.dataset.title = movie.title;
+          select.appendChild(option);
+        });
+      }
+
+      function renderSelected() {
+        const chips = document.getElementById("selectedChips");
+        chips.innerHTML = "";
+        selected.forEach((title, id) => {
+          const chip = document.createElement("div");
+          chip.className = "chip";
+          chip.textContent = `${title} [${id}]`;
+          chips.appendChild(chip);
+        });
+      }
+
+      function renderRecommendations(data) {
+        const list = document.getElementById("recommendationList");
+        list.innerHTML = "";
+        data.predictions.forEach((pred) => {
+          const li = document.createElement("li");
+          li.textContent = `${pred.title} (id=${pred.item_id}) score=${pred.score.toFixed(4)}`;
+          list.appendChild(li);
+        });
+
+        const labels = data.predictions.map((x) => x.title);
+        const scores = data.predictions.map((x) => x.score);
+
+        if (scoreChart) scoreChart.destroy();
+        scoreChart = new Chart(document.getElementById("scoreChart"), {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{ label: "Recommendation Score", data: scores }],
+          },
+          options: { responsive: true, plugins: { legend: { display: false } } },
+        });
+
+        const first = data.predictions[0];
+        const contribLabels = first ? first.contributions.map((c) => c.liked_title) : [];
+        const contribScores = first ? first.contributions.map((c) => c.similarity) : [];
+
+        if (contribChart) contribChart.destroy();
+        contribChart = new Chart(document.getElementById("contribChart"), {
+          type: "bar",
+          data: {
+            labels: contribLabels,
+            datasets: [{ label: "Similarity Contribution", data: contribScores }],
+          },
+          options: { responsive: true, plugins: { legend: { display: false } } },
+        });
+      }
+
+      function renderHeatmap(debugData) {
+        const container = document.getElementById("heatmapContainer");
+        const candidates = debugData.top_candidates || [];
+        const likedItems = debugData.liked_items || [];
+        if (!candidates.length || !likedItems.length) {
+          container.innerHTML = "";
+          return;
+        }
+
+        const likedIds = likedItems.map((x) => x.item_id);
+        const likedTitleMap = new Map(likedItems.map((x) => [x.item_id, x.title]));
+
+        let minSim = Infinity;
+        let maxSim = -Infinity;
+        for (const cand of candidates) {
+          for (const c of cand.contributions || []) {
+            minSim = Math.min(minSim, c.similarity);
+            maxSim = Math.max(maxSim, c.similarity);
+          }
+        }
+
+        let html = "<table class='heatmap'><thead><tr><th>Recommended</th>";
+        for (const id of likedIds) {
+          const label = likedTitleMap.get(id) || id;
+          html += `<th title="${label}">${label.slice(0, 18)}</th>`;
+        }
+        html += "</tr></thead><tbody>";
+
+        for (const cand of candidates) {
+          const contribMap = new Map((cand.contributions || []).map((c) => [c.liked_item_id, c.similarity]));
+          html += `<tr><td>${cand.title.slice(0, 28)}</td>`;
+          for (const id of likedIds) {
+            const sim = Number(contribMap.get(id) || 0);
+            const bg = colorForSimilarity(sim, minSim, maxSim);
+            html += `<td style="background:${bg}; color:white;">${sim.toFixed(3)}</td>`;
+          }
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      }
+
+      function renderDebugSummary(debugData) {
+        const profile = debugData.user_profile || {};
+        const scoreSummary = debugData.score_summary || {};
+        const likedCount = (debugData.liked_items || []).length;
+        const msg = [
+          `Liked movies: ${likedCount}`,
+          `Profile method: ${profile.method || "n/a"}`,
+          `Profile vector norm: ${Number(profile.vector_norm || 0).toFixed(4)}`,
+          `Score range: [${Number(scoreSummary.min || 0).toFixed(4)}, ${Number(scoreSummary.max || 0).toFixed(4)}]`,
+          `Mean score: ${Number(scoreSummary.mean || 0).toFixed(4)}`,
+        ].join(" | ");
+        document.getElementById("debugSummary").textContent = msg;
+      }
+
+      async function searchMovies() {
+        document.getElementById("error").textContent = "";
+        const query = document.getElementById("movieSearch").value.trim();
+        const items = await fetchMovies(query);
+        renderMovieResults(items);
+      }
+
+      async function predict() {
+        document.getElementById("error").textContent = "";
+        document.getElementById("status").textContent = "Requesting recommendations...";
+
+        const likedItemIds = [...selected.keys()];
+        if (likedItemIds.length === 0) {
+          document.getElementById("status").textContent = "";
+          document.getElementById("error").textContent = "Select at least one liked movie first.";
+          return;
+        }
+
+        const topK = Number(document.getElementById("topK").value || 5);
+        const payload = {
+          liked_item_ids: likedItemIds,
+          top_k: topK,
+          exclude_seen: true,
+        };
+
+        const [explainRes, debugRes] = await Promise.all([
+          fetch("/predict/new/explain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }),
+          fetch("/predict/new/debug", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }),
+        ]);
+
+        if (!explainRes.ok) {
+          const err = await explainRes.text();
+          document.getElementById("status").textContent = "";
+          document.getElementById("error").textContent = `Prediction failed: ${err}`;
+          return;
+        }
+        if (!debugRes.ok) {
+          const err = await debugRes.text();
+          document.getElementById("status").textContent = "";
+          document.getElementById("error").textContent = `Debug view failed: ${err}`;
+          return;
+        }
+
+        const data = await explainRes.json();
+        const debugData = await debugRes.json();
+        renderRecommendations(data);
+        renderHeatmap(debugData);
+        renderDebugSummary(debugData);
+        document.getElementById("status").textContent = "Done.";
+      }
+
+      document.getElementById("searchBtn").addEventListener("click", () => {
+        searchMovies().catch((err) => {
+          document.getElementById("error").textContent = err.message;
+        });
+      });
+
+      document.getElementById("addBtn").addEventListener("click", () => {
+        const select = document.getElementById("movieResults");
+        const opt = select.options[select.selectedIndex];
+        if (!opt) return;
+        selected.set(opt.value, opt.dataset.title || opt.textContent);
+        renderSelected();
+      });
+
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        selected.clear();
+        renderSelected();
+      });
+
+      document.getElementById("predictBtn").addEventListener("click", () => {
+        predict().catch((err) => {
+          document.getElementById("status").textContent = "";
+          document.getElementById("error").textContent = err.message;
+        });
+      });
+
+      searchMovies().catch((err) => {
+        document.getElementById("error").textContent = err.message;
+      });
+    </script>
+  </body>
+</html>

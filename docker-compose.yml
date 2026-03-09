@@ -1,0 +1,12 @@
+services:
+  recommender-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: recommender-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    restart: unless-stopped
